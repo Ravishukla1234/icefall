@@ -191,8 +191,13 @@ def main():
         words = " ".join(hyp)
         s += f"{filename}:\n{words}\n\n"
     logging.info(s)
-    with open("/opt/ml/processing/output/output.txt", 'w') as file:
-        file.write(s)
+
+    #open text file
+    file = open("/opt/ml/processing/output/output.txt", "w")
+    #write string to file
+    file.write(s)
+    #close file
+    file.close()
 
     logging.info("Decoding Done")
 
