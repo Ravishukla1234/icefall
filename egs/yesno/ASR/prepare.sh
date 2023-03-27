@@ -10,6 +10,9 @@ stop_stage=100
 
 dl_dir=$PWD/download
 
+echo $dl_dir
+ls $dl_dir
+
 lang_dir=data/lang_phone
 lm_dir=data/lm
 
@@ -26,28 +29,28 @@ log() {
 
 log "dl_dir: $dl_dir"
 
+# if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
+#   log "Stage 0: Download data"
+#   mkdir -p $dl_dir
+
+#   if [ ! -f $dl_dir/waves_yesno/.completed ]; then
+#     lhotse download yesno $dl_dir
+#   fi
+# fi
+
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
-  log "Stage 0: Download data"
-  mkdir -p $dl_dir
-
-  if [ ! -f $dl_dir/waves_yesno/.completed ]; then
-    lhotse download yesno $dl_dir
-  fi
-fi
-
-if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   log "Stage 1: Prepare yesno manifest"
   mkdir -p data/manifests
   lhotse prepare yesno $dl_dir/waves_yesno data/manifests
 fi
 
-if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
+if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   log "Stage 2: Compute fbank for yesno"
   mkdir -p data/fbank
   ./local/compute_fbank_yesno.py
 fi
 
-if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
+if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   log "Stage 3: Prepare lang"
   # NOTE: "<UNK> SIL" is added for implementation convenience
   # as the graph compiler code requires that there is a OOV word
@@ -62,7 +65,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   ./local/prepare_lang.py
 fi
 
-if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
+if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   log "Stage 4: Prepare G"
   # We use a unigram G
   cat <<EOF > $lm_dir/G.arpa
@@ -88,7 +91,7 @@ EOF
   fi
 fi
 
-if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
+if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   log "Stage 5: Compile HLG"
   if [ ! -f $lang_dir/HLG.pt ]; then
     ./local/compile_hlg.py --lang-dir $lang_dir
