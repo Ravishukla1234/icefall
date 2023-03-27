@@ -191,6 +191,8 @@ def main():
         words = " ".join(hyp)
         s += f"{filename}:\n{words}\n\n"
     logging.info(s)
+    with open("output.txt", 'w') as file:
+        file.write(s)
 
     logging.info("Decoding Done")
 
