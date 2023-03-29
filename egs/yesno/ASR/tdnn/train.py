@@ -8,16 +8,23 @@ from typing import Optional, Tuple
 
 import k2
 import torch
-import torch.multiprocessing as mp
+# import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 from asr_datamodule import YesNoAsrDataModule
 from lhotse.utils import fix_random_seed
 from model import Tdnn
 from torch import Tensor
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
+
+###########################
+import smdistributed.dataparallel.torch.torch_smddp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import os
+
+
 
 from icefall.checkpoint import load_checkpoint
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
@@ -83,59 +90,38 @@ def get_parser():
 
 def get_params() -> AttributeDict:
     """Return a dict containing training parameters.
-
     All training related parameters that are not passed from the commandline
     is saved in the variable `params`.
-
     Commandline options are merged into `params` after they are parsed, so
     you can also access them via `params`.
-
     Explanation of options saved in `params`:
-
         - exp_dir: It specifies the directory where all training related
                    files, e.g., checkpoints, log, etc, are saved
-
         - lang_dir: It contains language related input files such as
                     "lexicon.txt"
-
         - lr: It specifies the initial learning rate
-
         - feature_dim: The model input dim. It has to match the one used
                        in computing features.
-
         - weight_decay:  The weight_decay for the optimizer.
-
         - subsampling_factor:  The subsampling factor for the model.
-
         - start_epoch:  If it is not zero, load checkpoint `start_epoch-1`
                         and continue training from that checkpoint.
-
         - best_train_loss: Best training loss so far. It is used to select
                            the model that has the lowest training loss. It is
                            updated during the training.
-
         - best_valid_loss: Best validation loss so far. It is used to select
                            the model that has the lowest validation loss. It is
                            updated during the training.
-
         - best_train_epoch: It is the epoch that has the best training loss.
-
         - best_valid_epoch: It is the epoch that has the best validation loss.
-
         - batch_idx_train: Used to writing statistics to tensorboard. It
                            contains number of batches trained so far across
                            epochs.
-
         - log_interval:  Print training loss if batch_idx % log_interval` is 0
-
         - valid_interval:  Run validation if batch_idx % valid_interval` is 0
-
         - reset_interval: Reset statistics if batch_idx % reset_interval is 0
-
         - beam_size: It is used in k2.ctc_loss
-
         - reduction: It is used in k2.ctc_loss
-
         - use_double_scores: It is used in k2.ctc_loss
     """
     params = AttributeDict(
@@ -170,14 +156,11 @@ def load_checkpoint_if_available(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
 ) -> None:
     """Load checkpoint from file.
-
     If params.start_epoch is positive, it will load the checkpoint from
     `params.start_epoch - 1`. Otherwise, this function does nothing.
-
     Apart from loading state dict for `model`, `optimizer` and `scheduler`,
     it also updates `best_train_epoch`, `best_train_loss`, `best_valid_epoch`,
     and `best_valid_loss` in `params`.
-
     Args:
       params:
         The return value of :func:`get_params`.
@@ -222,7 +205,6 @@ def save_checkpoint(
     rank: int = 0,
 ) -> None:
     """Save model, optimizer, scheduler and training stats to file.
-
     Args:
       params:
         It is returned by :func:`get_params`.
@@ -259,7 +241,6 @@ def compute_loss(
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute CTC loss given the model and its inputs.
-
     Args:
       params:
         Parameters for training. See :func:`get_params`.
@@ -372,11 +353,9 @@ def train_one_epoch(
     world_size: int = 1,
 ) -> None:
     """Train the model for one epoch.
-
     The training loss from the mean of all frames is saved in
     `params.train_loss`. It runs the validation process every
     `params.valid_interval` batches.
-
     Args:
       params:
         It is returned by :func:`get_params`.
@@ -431,23 +410,26 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
+        if dist.get_rank() == 0:
+            if batch_idx > 0 and batch_idx % params.valid_interval == 0:
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    graph_compiler=graph_compiler,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
+                )
+                logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
 
-        if batch_idx > 0 and batch_idx % params.valid_interval == 0:
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                graph_compiler=graph_compiler,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
-            model.train()
-            logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
             if tb_writer is not None:
                 valid_info.write_summary(
                     tb_writer,
                     "train/valid_",
                     params.batch_idx_train,
                 )
+        model.train()
+        logging.info(f"Epoch {params.cur_epoch}")
+
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -473,6 +455,12 @@ def run(rank, world_size, args):
     params.update(vars(args))
     params["env_info"] = get_env_info()
 
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    local_rank = int(os.getenv("LOCAL_RANK", -1))
+ 
+
+
     fix_random_seed(params.seed)
     if world_size > 1:
         setup_dist(rank, world_size, params.master_port)
@@ -496,14 +484,16 @@ def run(rank, world_size, args):
 
     graph_compiler = CtcTrainingGraphCompiler(lexicon=lexicon, device=device)
 
-    model = Tdnn(
+    model = DDP(Tdnn(
         num_features=params.feature_dim,
         num_classes=max_phone_id + 1,  # +1 for the blank symbol
-    )
+    )).to(device)
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 
     model.to(device)
+    torch.cuda.set_device(local_rank)
+    model.cuda(local_rank)
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
@@ -543,14 +533,14 @@ def run(rank, world_size, args):
             tb_writer=tb_writer,
             world_size=world_size,
         )
-
-        save_checkpoint(
-            params=params,
-            model=model,
-            optimizer=optimizer,
-            scheduler=None,
-            rank=rank,
-        )
+        if dist.get_rank() == 0:
+            save_checkpoint(
+                params=params,
+                model=model,
+                optimizer=optimizer,
+                scheduler=None,
+                rank=rank,
+            )
 
     logging.info("Done!")
     if world_size > 1:
@@ -559,12 +549,19 @@ def run(rank, world_size, args):
 
 
 def main():
+    dist.init_process_group(backend="nccl")
+    local_rank = os.environ["LOCAL_RANK"]
+    torch.cuda.set_device(local_rank)
     parser = get_parser()
     YesNoAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
 
     world_size = args.world_size
     assert world_size >= 1
+    batch_size //= dist.get_world_size()
+    batch_size = max(batch_size, 1)
+
+
     if world_size > 1:
         mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
     else:
