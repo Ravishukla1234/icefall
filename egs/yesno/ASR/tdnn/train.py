@@ -439,7 +439,7 @@ def train_one_epoch(
         params.best_train_loss = params.train_loss
 
 
-def run(rank, world_size, args):
+def run(args):
     """
     Args:
       rank:
@@ -556,16 +556,12 @@ def main():
     YesNoAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
 
-    world_size = args.world_size
+    world_size = dist.get_world_size()
     assert world_size >= 1
-    batch_size //= dist.get_world_size()
-    batch_size = max(batch_size, 1)
 
+    run(args=args)
 
-    if world_size > 1:
-        mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
-    else:
-        run(rank=0, world_size=1, args=args)
+        
 
 
 if __name__ == "__main__":
