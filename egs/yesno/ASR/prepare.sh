@@ -29,14 +29,14 @@ log() {
 
 log "dl_dir: $dl_dir"
 
-# if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
-#   log "Stage 0: Download data"
-#   mkdir -p $dl_dir
+if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
+  log "Stage 0: Download data"
+  mkdir -p $dl_dir
 
-#   if [ ! -f $dl_dir/waves_yesno/.completed ]; then
-#     lhotse download yesno $dl_dir
-#   fi
-# fi
+  if [ ! -f $dl_dir/waves_yesno/.completed ]; then
+    lhotse download yesno $dl_dir
+  fi
+fi
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   log "Stage 1: Prepare yesno manifest"
