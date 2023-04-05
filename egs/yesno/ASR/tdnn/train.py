@@ -573,8 +573,9 @@ def main():
     parser = get_parser()
     YesNoAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
-
-    world_size = args.world_size
+    
+    #world_size = args.world_size
+    world_size = dist.get_world_size()
     assert world_size >= 1
     
     print(f"world_size - {world_size}")
