@@ -10,9 +10,6 @@ stop_stage=100
 
 dl_dir=$PWD/download
 
-echo $dl_dir
-ls $dl_dir
-
 lang_dir=data/lang_phone
 lm_dir=data/lm
 
@@ -29,14 +26,14 @@ log() {
 
 log "dl_dir: $dl_dir"
 
-if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
-  log "Stage 0: Download data"
-  mkdir -p $dl_dir
+# if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
+#   log "Stage 0: Download data"
+#   mkdir -p $dl_dir
 
-  if [ ! -f $dl_dir/waves_yesno/.completed ]; then
-    lhotse download yesno $dl_dir
-  fi
-fi
+#   if [ ! -f $dl_dir/waves_yesno/.completed ]; then
+#     lhotse download yesno $dl_dir
+#   fi
+# fi
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   log "Stage 1: Prepare yesno manifest"
@@ -69,18 +66,14 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   log "Stage 4: Prepare G"
   # We use a unigram G
   cat <<EOF > $lm_dir/G.arpa
-
 \data\\
 ngram 1=4
-
 \1-grams:
 -1 NO
 -1 YES
 -99 <s>
 -1 </s>
-
 \end\\
-
 EOF
 
   if [ ! -f $lm_dir/G.fst.txt ]; then
