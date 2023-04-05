@@ -22,6 +22,8 @@ from torch.utils.tensorboard import SummaryWriter
 import smdistributed.dataparallel.torch.torch_smddp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.optim import ZeroRedundancyOptimizer as ZeRO
+from torch.distributed.algorithms.join import Join
 import os
 
 
@@ -33,6 +35,8 @@ from icefall.env import get_env_info
 from icefall.graph_compiler import CtcTrainingGraphCompiler
 from icefall.lexicon import Lexicon
 from icefall.utils import AttributeDict, MetricsTracker, setup_logger, str2bool
+
+
 
 
 def get_parser():
@@ -64,7 +68,7 @@ def get_parser():
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=15,
+        default=8,
         help="Number of epochs to train.",
     )
 
@@ -213,7 +217,13 @@ def save_checkpoint(
     """
     if rank != 0:
         return
+    
+
+
     filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+    
+    
+    
     save_checkpoint_impl(
         filename=filename,
         model=model,
@@ -222,6 +232,7 @@ def save_checkpoint(
         scheduler=scheduler,
         rank=rank,
     )
+
 
     if params.best_train_epoch == params.cur_epoch:
         best_train_filename = params.exp_dir / "best-train-loss.pt"
@@ -258,6 +269,9 @@ def compute_loss(
         function enables autograd during computation; when it is False, it
         disables autograd.
     """
+    
+
+    
     device = graph_compiler.device
     feature = batch["inputs"]
     # at entry, feature is (N, T, C)
@@ -301,6 +315,7 @@ def compute_loss(
     info["frames"] = supervision_segments[:, 2].sum().item()
     info["loss"] = loss.detach().cpu().item()
 
+
     return loss, info
 
 
@@ -314,6 +329,8 @@ def compute_validation_loss(
     """Run the validation process. The validation loss
     is saved in `params.valid_loss`.
     """
+
+
     model.eval()
 
     tot_loss = MetricsTracker()
@@ -339,8 +356,8 @@ def compute_validation_loss(
         params.best_valid_epoch = params.cur_epoch
         params.best_valid_loss = loss_value
 
-    return tot_loss
 
+    return tot_loss
 
 def train_one_epoch(
     params: AttributeDict,
@@ -374,6 +391,9 @@ def train_one_epoch(
       world_size:
         Number of nodes in DDP training. If it is 1, DDP is disabled.
     """
+
+
+
     model.train()
 
     tot_loss = MetricsTracker()
@@ -410,16 +430,18 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
-        if dist.get_rank() == 0:
-            if batch_idx > 0 and batch_idx % params.valid_interval == 0:
-                valid_info = compute_validation_loss(
-                    params=params,
-                    model=model,
-                    graph_compiler=graph_compiler,
-                    valid_dl=valid_dl,
-                    world_size=world_size,
-                )
-                logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
+
+        if batch_idx > 0 and batch_idx % params.valid_interval == 0:
+            valid_info = compute_validation_loss(
+                params=params,
+                model=model,
+                graph_compiler=graph_compiler,
+                valid_dl=valid_dl,
+                world_size=world_size,
+            )
+            model.train()
+            logging.info(f"Epoch {params.cur_epoch}")
+            logging.info(f"Epoch {params.cur_epoch}, validation {valid_info}")
 
             if tb_writer is not None:
                 valid_info.write_summary(
@@ -427,9 +449,6 @@ def train_one_epoch(
                     "train/valid_",
                     params.batch_idx_train,
                 )
-        model.train()
-        logging.info(f"Epoch {params.cur_epoch}")
-
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -437,9 +456,10 @@ def train_one_epoch(
     if params.train_loss < params.best_train_loss:
         params.best_train_epoch = params.cur_epoch
         params.best_train_loss = params.train_loss
+        
 
 
-def run(args):
+def run(args,world_size=1):
     """
     Args:
       rank:
@@ -455,15 +475,15 @@ def run(args):
     params.update(vars(args))
     params["env_info"] = get_env_info()
 
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    local_rank = int(os.getenv("LOCAL_RANK", -1))
- 
-
+    if world_size>1:
+        rank = dist.get_rank()
+        local_rank = int(os.getenv("LOCAL_RANK", -1))   
+        print(f"rank - {rank}")
+        print(f"local_rank - {local_rank}")
+    else:
+        rank = 0
 
     fix_random_seed(params.seed)
-    if world_size > 1:
-        setup_dist(rank, world_size, params.master_port)
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -479,33 +499,32 @@ def run(args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"device: {device}")
 
     graph_compiler = CtcTrainingGraphCompiler(lexicon=lexicon, device=device)
 
-    model = DDP(Tdnn(
+    model = Tdnn(
         num_features=params.feature_dim,
         num_classes=max_phone_id + 1,  # +1 for the blank symbol
-    )).to(device)
+    )
 
     checkpoints = load_checkpoint_if_available(params=params, model=model)
 
     model.to(device)
-    torch.cuda.set_device(local_rank)
-    model.cuda(local_rank)
     if world_size > 1:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(model, device_ids=[local_rank])
 
-    optimizer = optim.SGD(
+
+    if world_size > 1:
+        optimizer = ZeRO(model.parameters(), torch.optim.SGD, lr=0.01)
+    else:
+        optimizer = optim.SGD(
         model.parameters(),
         lr=params.lr,
         weight_decay=params.weight_decay,
     )
-
-    if checkpoints:
-        optimizer.load_state_dict(checkpoints["optimizer"])
-
+        
     yes_no = YesNoAsrDataModule(args)
     train_dl = yes_no.train_dataloaders()
 
@@ -513,55 +532,61 @@ def run(args):
     # and the remaining 30 files are used for testing.
     # We use test data as validation.
     valid_dl = yes_no.test_dataloaders()
+        
+    with Join([model, optimizer]):
+        for epoch in range(params.start_epoch, params.num_epochs):
+            fix_random_seed(params.seed + epoch)
+            train_dl.sampler.set_epoch(epoch)
 
-    for epoch in range(params.start_epoch, params.num_epochs):
-        fix_random_seed(params.seed + epoch)
-        train_dl.sampler.set_epoch(epoch)
+            if tb_writer is not None:
+                tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
-        if tb_writer is not None:
-            tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
+            params.cur_epoch = epoch
 
-        params.cur_epoch = epoch
-
-        train_one_epoch(
-            params=params,
-            model=model,
-            optimizer=optimizer,
-            graph_compiler=graph_compiler,
-            train_dl=train_dl,
-            valid_dl=valid_dl,
-            tb_writer=tb_writer,
-            world_size=world_size,
-        )
-        if dist.get_rank() == 0:
-            save_checkpoint(
+            train_one_epoch(
                 params=params,
                 model=model,
                 optimizer=optimizer,
-                scheduler=None,
-                rank=rank,
+                graph_compiler=graph_compiler,
+                train_dl=train_dl,
+                valid_dl=valid_dl,
+                tb_writer=tb_writer,
+                world_size=world_size,
             )
+            
+            if dist.get_rank() == 0:
+                save_checkpoint(
+                    params=params,
+                    model=model,
+                    optimizer=None,
+                    scheduler=None,
+                    rank=dist.get_rank(),
+                )
 
     logging.info("Done!")
     if world_size > 1:
-        torch.distributed.barrier()
-        cleanup_dist()
+        dist.barrier()
 
 
 def main():
-    dist.init_process_group(backend="nccl")
-    local_rank = os.environ["LOCAL_RANK"]
-    torch.cuda.set_device(local_rank)
+    
     parser = get_parser()
     YesNoAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
 
-    world_size = dist.get_world_size()
+    world_size = args.world_size
     assert world_size >= 1
+    
+    print(f"world_size - {world_size}")
+    
+    if world_size > 1:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.getenv("LOCAL_RANK", -1))
+        torch.cuda.set_device(int(local_rank))
+        run(args=args,world_size = world_size)
+    else:
+        run(args=args,world_size = 1)
 
-    run(args=args)
-
-        
 
 
 if __name__ == "__main__":
