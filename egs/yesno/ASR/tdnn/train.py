@@ -577,7 +577,6 @@ def main():
     #world_size = args.world_size
     #assert world_size >= 1
     
-    print(f"world_size - {world_size}")
     
     if world_size > 1:
         dist.init_process_group(backend="nccl")
