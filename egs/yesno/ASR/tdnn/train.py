@@ -578,15 +578,12 @@ def main():
     #assert world_size >= 1
     
     
-    if world_size > 1:
-        dist.init_process_group(backend="nccl")
-        world_size = dist.get_world_size()
-        local_rank = int(os.getenv("LOCAL_RANK", -1))
-        torch.cuda.set_device(int(local_rank))
-        run(args=args,world_size = world_size)
-        
-    else:
-        run(args=args,world_size = 1)
+    dist.init_process_group(backend="nccl")
+    world_size = dist.get_world_size()
+    local_rank = int(os.getenv("LOCAL_RANK", -1))
+    torch.cuda.set_device(int(local_rank))
+    run(args=args,world_size = world_size)
+
 
 
 
