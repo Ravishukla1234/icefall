@@ -575,16 +575,17 @@ def main():
     args = parser.parse_args()
     
     #world_size = args.world_size
-    world_size = dist.get_world_size()
-    assert world_size >= 1
+    #assert world_size >= 1
     
     print(f"world_size - {world_size}")
     
     if world_size > 1:
         dist.init_process_group(backend="nccl")
+        world_size = dist.get_world_size()
         local_rank = int(os.getenv("LOCAL_RANK", -1))
         torch.cuda.set_device(int(local_rank))
         run(args=args,world_size = world_size)
+        
     else:
         run(args=args,world_size = 1)
 
